@@ -60,71 +60,38 @@ data NameInfo n
 
 makeReferences ''NameInfo
 
--- * SOURCE INFORMATION * --
-
--- | Location info for different types of nodes
-data NodeSpan 
-  = NodeSpan { _nodeSpan :: GHC.SrcSpan }
-
-makeReferences ''NodeSpan
-
-data ListPos
-  = ListPos { _listBefore :: String
-            , _listAfter :: String
-            , _listDefaultSep :: String
-            , _listIndented :: Bool
-            , _listPos :: GHC.SrcLoc 
-            }
-
-makeReferences ''ListPos
-
 -- * DOMAIN DEFINITION * --
 
 data RangeStage
 data RngTemplateStage
 data SrcTemplateStage
 
-data Dom name stage
+data Dom name
 
-type SemanticInfo (domain :: *) (node :: * -> *) = SemanticInfo' domain (SemaInfoClassify node)
+deriving instance (Data name, Typeable name) => Data (Dom name)
+
+type SemanticInfo (domain :: *) (node :: * -> * -> *) = SemanticInfo' domain (SemaInfoClassify node)
 
 data SameInfoNameCls
 data SameInfoExprCls
 data SameInfoDefaultCls
 
-type family SemaInfoClassify (node :: * -> *) where
+type family SemaInfoClassify (node :: * -> * -> *) where
   SemaInfoClassify Name = SameInfoNameCls
   SemaInfoClassify Expr = SameInfoExprCls
   SemaInfoClassify a    = SameInfoDefaultCls
 
 type family SemanticInfo' (domain :: *) (nodecls :: *)
 
-type instance SemanticInfo' (Dom n st) SameInfoNameCls = NameInfo n
-type instance SemanticInfo' (Dom n st) SameInfoExprCls = ScopeInfo
-type instance SemanticInfo' (Dom n st) SameInfoDefaultCls = NoSemanticInfo
-
-type SourceInfo (domain :: *) (node :: * -> *) = SourceInfo' domain (SrcInfoClassify node)
-
-data SrcInfoListCls
-data SrcInfoNodeCls
-
-type family SrcInfoClassify (node :: * -> *) where
-  SrcInfoClassify (AnnList a) = SrcInfoListCls
-  SrcInfoClassify a           = SrcInfoNodeCls
-
-type family SourceInfo' (domain :: *) (nodecls :: *)
-
-type instance SourceInfo' (Dom n RangeStage) SrcInfoListCls = ListPos
-type instance SourceInfo' (Dom n RangeStage) SrcInfoNodeCls = NodeSpan
-
+type instance SemanticInfo' (Dom n) SameInfoNameCls = NameInfo n
+type instance SemanticInfo' (Dom n) SameInfoExprCls = ScopeInfo
+type instance SemanticInfo' (Dom n) SameInfoDefaultCls = NoSemanticInfo
 
 class ( Typeable d
       , Data d
       , Data (SemanticInfo' d SameInfoNameCls)
       , Data (SemanticInfo' d SameInfoExprCls)
       , Data (SemanticInfo' d SameInfoDefaultCls)
-      , Data (SourceInfo' d SrcInfoListCls)
-      , Data (SourceInfo' d SrcInfoNodeCls)
       ) => Domain d where
 
 instance ( Typeable d
@@ -132,57 +99,72 @@ instance ( Typeable d
          , Data (SemanticInfo' d SameInfoNameCls)
          , Data (SemanticInfo' d SameInfoExprCls)
          , Data (SemanticInfo' d SameInfoDefaultCls)
-         , Data (SourceInfo' d SrcInfoListCls)
-         , Data (SourceInfo' d SrcInfoNodeCls)
          ) => Domain d where
 
 
 class ( Data (SemanticInfo' d (SemaInfoClassify e))
-      , Data (SourceInfo' d (SrcInfoClassify e))
       , Domain d
       ) => DomainWith e d where
 
 instance ( Data (SemanticInfo' d (SemaInfoClassify e))
-         , Data (SourceInfo' d (SrcInfoClassify e))
          , Domain d
          ) => DomainWith e d where
 
+class (Typeable stage, Data stage, Data (SpanInfo stage), Data (ListInfo stage)) 
+         => SourceInfo stage where
+  data SpanInfo stage :: *
+  data ListInfo stage :: *
+
+instance SourceInfo RangeStage where
+  data SpanInfo RangeStage = NodeSpan { _nodeSpan :: GHC.SrcSpan }
+  data ListInfo RangeStage = ListPos  { _listBefore :: String
+                                      , _listAfter :: String
+                                      , _listDefaultSep :: String
+                                      , _listIndented :: Bool
+                                      , _listPos :: GHC.SrcLoc 
+                                      }
+
+data SourceTransform f from to 
+  = SourceTransform { transformSpans :: SpanInfo from -> f (SpanInfo to)
+                    , transformLists :: ListInfo from -> f (ListInfo to)
+                    }
+
 -- * CREATE GENERAL AST ELEMENTS * --
 
-data Ann elem dom
+data Ann elem dom stage
 -- The type parameters are organized this way because we want the annotation type to
 -- be more flexible, but the annotation is the first parameter because it eases 
 -- pattern matching.
-  = Ann { _annotation :: NodeInfo (SemanticInfo dom elem) (SourceInfo dom elem) -- ^ The extra information for the AST part
-        , _element    :: elem dom -- ^ The original AST part
+  = Ann { _annotation :: NodeInfo (SemanticInfo dom elem) (SpanInfo stage) -- ^ The extra information for the AST part
+        , _element    :: elem dom stage -- ^ The original AST part
         }
         
 
 -- | A list of AST elements
-data AnnList e dom = AnnList { _annListAnnot :: NodeInfo (SemanticInfo dom (AnnList e)) (SourceInfo dom (AnnList e))
-                             , _annListElems :: [Ann e dom]
-                             }
+data AnnList e dom stage = AnnList { _annListAnnot :: NodeInfo (SemanticInfo dom (AnnList e)) (ListInfo stage)
+                                   , _annListElems :: [Ann e dom stage]
+                                   }
                            
 
 -- * CREATE SPECIAL AST ELEMENTS * --
 
-data Expr dom
-  = Var            { _exprName :: Ann Name dom
+data Expr dom st
+  = Var            { _exprName :: Ann Name dom st
                    } -- ^ A variable or a data constructor (@ a @)
-  | App            { _exprFun :: Ann Expr dom
-                   , _exprArg :: Ann Expr dom
+  | App            { _exprFun :: Ann Expr dom st
+                   , _exprArg :: Ann Expr dom st
                    } -- ^ Function application (@ f 4 @)
                    -- unary minus omitted
-  | Lambda         { _exprBindings :: AnnList Pattern dom -- ^ at least one
-                   , _exprInner :: Ann Expr dom
+  | Lambda         { _exprBindings :: AnnList Pattern dom st -- ^ at least one
+                   , _exprInner :: Ann Expr dom st
                    } -- ^ Lambda expression (@ \a b -> a + b @)
 
 -- | Representation of patterns for pattern bindings
-data Pattern dom
-  = VarPat        { _patternName :: Ann Name dom
+data Pattern dom st
+  = VarPat        { _patternName :: Ann Name dom st
                   } -- ^ Pattern name binding
 
-data Name dom
+data Name dom st
   = Name { _nameStr :: String
          }
 
@@ -197,34 +179,42 @@ makeReferences ''Name
 
 -- create structural traversal
 
---instance StructuralTraversable elem => StructuralTraversable (Ann elem) where
---  traverseUp desc asc f (Ann ann e) = flip Ann <$> (desc *> traverseUp desc asc f e <* asc) <*> f ann
---  traverseDown desc asc f (Ann ann e) = Ann <$> f ann <*> (desc *> traverseDown desc asc f e <* asc)
+class SourceInfoTraversal elem where
+  traverseUpSI :: Monad f => f () -> f () -> SourceTransform f from to -> elem dom from -> f (elem dom to)
+  traverseDownSI :: Monad f => f () -> f () -> SourceTransform f from to -> elem dom from -> f (elem dom to)
 
---instance StructuralTraversable elem => StructuralTraversable (AnnList elem) where
---  traverseUp desc asc f (AnnList a ls) 
---    = flip AnnList <$> sequenceA (map (\e -> desc *> traverseUp desc asc f e <* asc) ls) <*> f a
---  traverseDown desc asc f (AnnList a ls) 
---    = AnnList <$> f a <*> sequenceA (map (\e -> desc *> traverseDown desc asc f e <* asc) ls)
+instance SourceInfoTraversal elem => SourceInfoTraversal (Ann elem) where
+  traverseUpSI desc asc f (Ann (NodeInfo sema src) e) 
+    = flip Ann <$> (desc *> traverseUpSI desc asc f e <* asc) <*> (NodeInfo sema <$> transformSpans f src)
+  traverseDownSI desc asc f (Ann (NodeInfo sema src) e) 
+    = Ann <$> (NodeInfo sema <$> transformSpans f src) <*> (desc *> traverseDownSI desc asc f e <* asc)
+
+instance SourceInfoTraversal elem => SourceInfoTraversal (AnnList elem) where
+  traverseUpSI desc asc f (AnnList (NodeInfo sema src) ls) 
+    = flip AnnList <$> sequenceA (map (\e -> desc *> traverseUpSI desc asc f e <* asc) ls) <*> (NodeInfo sema <$> transformLists f src)
+  traverseDownSI desc asc f (AnnList (NodeInfo sema src) ls) 
+    = AnnList <$> (NodeInfo sema <$> transformLists f src) <*> sequenceA (map (\e -> desc *> traverseDownSI desc asc f e <* asc) ls)
 
 --deriveStructTrav ''Expr
 --deriveStructTrav ''Pattern
 --deriveStructTrav ''Name
 
--- deriving Data instances
+-- * deriving Data instances * --
 
-deriving instance (Typeable e, Data (e d), DomainWith e d) => Data (Ann e d)
-deriving instance (Typeable e, Data (e d), DomainWith e d) => Data (AnnList e d)
+deriving instance (Typeable e, SourceInfo st, Data (e d st), DomainWith e d) => Data (Ann e d st)
+deriving instance (Typeable e, SourceInfo st, Data (e d st), DomainWith e d) => Data (AnnList e d st)
 
-deriving instance (Domain d) => Data (Expr d)
-deriving instance (Domain d) => Data (Pattern d)
-deriving instance (Domain d) => Data (Name d)
+deriving instance (Domain d, SourceInfo st) => Data (Expr d st)
+deriving instance (Domain d, SourceInfo st) => Data (Pattern d st)
+deriving instance (Domain d, SourceInfo st) => Data (Name d st)
 
 deriving instance (Data sema, Data src) => Data (NodeInfo sema src)
 deriving instance (Data n) => Data (NameInfo n)
+deriving instance Data NoSemanticInfo
 deriving instance Data ScopeInfo
-deriving instance Data NodeSpan
-deriving instance Data ListPos
+deriving instance Data RangeStage
+deriving instance Data (SpanInfo RangeStage)
+deriving instance Data (ListInfo RangeStage)
 
 deriving instance Data GHC.SrcLoc
   
@@ -260,7 +250,7 @@ mkSpan from to = GHC.mkSrcSpan (GHC.mkSrcLoc fileName 1 from) (GHC.mkSrcLoc file
 
 src = "\f a -> f a"
 
-testExpr :: Ann Expr (Dom GHC.Id RangeStage)
+testExpr :: Ann Expr (Dom GHC.Id) RangeStage
 testExpr 
   = Ann 
       (NodeInfo (ScopeInfo []) (NodeSpan (mkSpan 1 12)))
@@ -296,14 +286,14 @@ testExpr
 
 
 -- should be Just "f"
---testReference :: Maybe String
---testReference = testExpr ^? element&exprInner&element&exprFun&element&exprName&element&nameStr
+testReference :: Maybe String
+testReference = testExpr ^? element&exprInner&element&exprFun&element&exprName&element&nameStr
 
 -- should be ["f", "a", "f", "a"]
---testBiplate :: [String]    
---testBiplate = map (GHC.occNameString . GHC.nameOccName . Var.varName) 
---                $ catMaybes $ map (\n -> n ^? annotation&semanticInfo&nameInfo) -- itt a ^. operátort lehetne használni
---                $ (testExpr ^? biplateRef :: [Ann Name I])
+testBiplate :: [String]    
+testBiplate = map (GHC.occNameString . GHC.nameOccName . Var.varName) 
+                $ map (\n -> n ^. annotation&semanticInfo&nameInfo) -- itt a ^. operátort lehetne használni
+                $ (testExpr ^? biplateRef :: [Ann Name (Dom GHC.Id) RangeStage])
 
 --type I2 = NodeInfo (SemanticInfo GHC.Name) ()
 
