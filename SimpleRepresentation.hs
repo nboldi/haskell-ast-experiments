@@ -11,13 +11,13 @@
 module SimpleRepresentation where
 
 import Control.Reference hiding (element)
-import Data.StructuralTraversal
 
 import Data.Data
 import Data.Generics.Uniplate.Data
 import Data.Maybe
 import Control.Applicative
 import Control.Monad.Identity
+import Control.Monad.IO.Class
 
 import qualified GHC
 import qualified Name as GHC  
@@ -27,8 +27,10 @@ import qualified Type
 import qualified IdInfo as GHC  
 import qualified Module as GHC  
 import qualified Unique as GHC  
+import qualified Outputable as GHC  
 import qualified FastString as GHC  
 import TysWiredIn (intTy)  
+import GHC.Paths ( libdir )
 
        
 -- | Semantic and source code related information for an AST node.
@@ -36,6 +38,7 @@ data NodeInfo sema src
   = NodeInfo { _semanticInfo :: sema
              , _sourceInfo :: src
              }
+  deriving Show
              
 makeReferences ''NodeInfo
 
@@ -46,9 +49,12 @@ makeReferences ''NodeInfo
 data NoSemanticInfo
   = NoSemanticInfo -- ^ Semantic info type for any node not 
                    -- carrying additional semantic information
+  deriving Show
 data ScopeInfo
   = ScopeInfo { _exprScopedLocals :: [[GHC.Name]] 
               }
+
+deriving instance Show ScopeInfo
 
 makeReferences ''ScopeInfo
 
@@ -57,8 +63,9 @@ data NameInfo n
              , _isDefined :: Bool
              , _nameInfo :: n
              } -- ^ Info corresponding to a name
-
 makeReferences ''NameInfo
+
+deriving instance Show n => Show (NameInfo n)
 
 -- * DOMAIN DEFINITION * --
 
@@ -92,6 +99,9 @@ class ( Typeable d
       , Data (SemanticInfo' d SameInfoNameCls)
       , Data (SemanticInfo' d SameInfoExprCls)
       , Data (SemanticInfo' d SameInfoDefaultCls)
+      , Show (SemanticInfo' d SameInfoNameCls)
+      , Show (SemanticInfo' d SameInfoExprCls)
+      , Show (SemanticInfo' d SameInfoDefaultCls)
       ) => Domain d where
 
 instance ( Typeable d
@@ -99,30 +109,49 @@ instance ( Typeable d
          , Data (SemanticInfo' d SameInfoNameCls)
          , Data (SemanticInfo' d SameInfoExprCls)
          , Data (SemanticInfo' d SameInfoDefaultCls)
+         , Show (SemanticInfo' d SameInfoNameCls)
+         , Show (SemanticInfo' d SameInfoExprCls)
+         , Show (SemanticInfo' d SameInfoDefaultCls)
          ) => Domain d where
 
 
 class ( Data (SemanticInfo' d (SemaInfoClassify e))
+      , Show (SemanticInfo' d (SemaInfoClassify e))
       , Domain d
       ) => DomainWith e d where
 
 instance ( Data (SemanticInfo' d (SemaInfoClassify e))
+         , Show (SemanticInfo' d (SemaInfoClassify e))
          , Domain d
          ) => DomainWith e d where
 
-class (Typeable stage, Data stage, Data (SpanInfo stage), Data (ListInfo stage)) 
+class ( Typeable stage
+      , Data stage
+      , Data (SpanInfo stage)
+      , Data (ListInfo stage)
+      , Show (SpanInfo stage)
+      , Show (ListInfo stage)
+      ) 
          => SourceInfo stage where
   data SpanInfo stage :: *
   data ListInfo stage :: *
 
 instance SourceInfo RangeStage where
   data SpanInfo RangeStage = NodeSpan { _nodeSpan :: GHC.SrcSpan }
+    deriving Show
   data ListInfo RangeStage = ListPos  { _listBefore :: String
                                       , _listAfter :: String
                                       , _listDefaultSep :: String
                                       , _listIndented :: Bool
                                       , _listPos :: GHC.SrcLoc 
                                       }
+    deriving Show
+
+nodeSpan :: Simple Lens (SpanInfo RangeStage) GHC.SrcSpan
+nodeSpan = lens _nodeSpan (\b s -> s { _nodeSpan = b })
+
+listPos :: Simple Lens (ListInfo RangeStage) GHC.SrcLoc
+listPos = lens _listPos (\b s -> s { _listPos = b })
 
 data SourceTransform f from to 
   = SourceTransform { transformSpans :: SpanInfo from -> f (SpanInfo to)
@@ -138,13 +167,12 @@ data Ann elem dom stage
   = Ann { _annotation :: NodeInfo (SemanticInfo dom elem) (SpanInfo stage) -- ^ The extra information for the AST part
         , _element    :: elem dom stage -- ^ The original AST part
         }
-        
 
 -- | A list of AST elements
 data AnnList e dom stage = AnnList { _annListAnnot :: NodeInfo (SemanticInfo dom (AnnList e)) (ListInfo stage)
                                    , _annListElems :: [Ann e dom stage]
                                    }
-                           
+                   
 
 -- * CREATE SPECIAL AST ELEMENTS * --
 
@@ -195,18 +223,43 @@ instance SourceInfoTraversal elem => SourceInfoTraversal (AnnList elem) where
   traverseDownSI desc asc f (AnnList (NodeInfo sema src) ls) 
     = AnnList <$> (NodeInfo sema <$> transformLists f src) <*> sequenceA (map (\e -> desc *> traverseDownSI desc asc f e <* asc) ls)
 
+-- TODO: should be derived
 --deriveStructTrav ''Expr
 --deriveStructTrav ''Pattern
 --deriveStructTrav ''Name
 
--- * deriving Data instances * --
+instance SourceInfoTraversal Expr where
+  traverseUpSI desc asc f (Var name) = Var <$> traverseUpSI desc asc f name
+  traverseUpSI desc asc f (App fun arg) = App <$> traverseUpSI desc asc f fun <*> traverseUpSI desc asc f arg
+  traverseUpSI desc asc f (Lambda bnds e) = Lambda <$> traverseUpSI desc asc f bnds <*> traverseUpSI desc asc f e
+  traverseDownSI desc asc f (Var name) = Var <$> traverseDownSI desc asc f name
+  traverseDownSI desc asc f (App fun arg) = App <$> traverseDownSI desc asc f fun <*> traverseDownSI desc asc f arg
+  traverseDownSI desc asc f (Lambda bnds e) = Lambda <$> traverseDownSI desc asc f bnds <*> traverseDownSI desc asc f e
+
+instance SourceInfoTraversal Pattern where
+  traverseUpSI desc asc f (VarPat name) = VarPat <$> traverseUpSI desc asc f name
+  traverseDownSI desc asc f (VarPat name) = VarPat <$> traverseDownSI desc asc f name
+
+instance SourceInfoTraversal Name where
+  traverseUpSI desc asc f (Name name) = pure $ Name name
+  traverseDownSI desc asc f (Name name) = pure $ Name name
+
+
+-- * deriving instances * --
 
 deriving instance (Typeable e, SourceInfo st, Data (e d st), DomainWith e d) => Data (Ann e d st)
 deriving instance (Typeable e, SourceInfo st, Data (e d st), DomainWith e d) => Data (AnnList e d st)
 
+deriving instance (DomainWith elem dom, SourceInfo stage, Show (elem dom stage)) => Show (Ann elem dom stage)        
+deriving instance (DomainWith elem dom, SourceInfo stage, Show (elem dom stage)) => Show (AnnList elem dom stage)        
+
 deriving instance (Domain d, SourceInfo st) => Data (Expr d st)
 deriving instance (Domain d, SourceInfo st) => Data (Pattern d st)
 deriving instance (Domain d, SourceInfo st) => Data (Name d st)
+
+deriving instance (Domain d, SourceInfo st) => Show (Expr d st)
+deriving instance (Domain d, SourceInfo st) => Show (Pattern d st)
+deriving instance (Domain d, SourceInfo st) => Show (Name d st)
 
 deriving instance (Data sema, Data src) => Data (NodeInfo sema src)
 deriving instance (Data n) => Data (NameInfo n)
@@ -217,6 +270,11 @@ deriving instance Data (SpanInfo RangeStage)
 deriving instance Data (ListInfo RangeStage)
 
 deriving instance Data GHC.SrcLoc
+
+instance Show GHC.Name where
+  show = GHC.showSDocUnsafe . GHC.ppr
+instance Show GHC.Id where
+  show = GHC.showSDocUnsafe . GHC.ppr
   
 instance Data GHC.RealSrcLoc where
     gfoldl k z rsl = z GHC.mkRealSrcLoc `k` GHC.srcLocFile rsl `k` GHC.srcLocLine rsl `k` GHC.srcLocCol rsl
@@ -249,6 +307,17 @@ mkSpan :: Int -> Int -> GHC.SrcSpan
 mkSpan from to = GHC.mkSrcSpan (GHC.mkSrcLoc fileName 1 from) (GHC.mkSrcLoc fileName 1 from)
 
 src = "\f a -> f a"
+
+test = GHC.runGhc (Just libdir) $ liftIO $ 
+  do putStrLn "testExpr: "
+     print testExpr
+     putStrLn "testReference: "
+     print testReference
+     putStrLn "testBiplate: "
+     print testBiplate
+     putStrLn "testStructuralTraveral: "
+     print testStructuralTraveral
+
 
 testExpr :: Ann Expr (Dom GHC.Id) RangeStage
 testExpr 
@@ -295,15 +364,9 @@ testBiplate = map (GHC.occNameString . GHC.nameOccName . Var.varName)
                 $ map (\n -> n ^. annotation&semanticInfo&nameInfo) -- itt a ^. operátort lehetne használni
                 $ (testExpr ^? biplateRef :: [Ann Name (Dom GHC.Id) RangeStage])
 
---type I2 = NodeInfo (SemanticInfo GHC.Name) ()
-
---testStructuralTraveral :: Ann Expr I2
---testStructuralTraveral 
---  = runIdentity $ traverseUp (return ()) (return ()) (Identity . (semanticInfo .- toNameInfo)) 
---      $ runIdentity $ traverseUp (return ()) (return ()) (Identity . (sourceInfo .= ())) 
---      $ testExpr
---  where toNameInfo NoSemanticInfo = NoSemanticInfo
---        toNameInfo (ScopeInfo sc) = ScopeInfo sc
---        toNameInfo (NameInfo sc dd id) = NameInfo sc dd (GHC.getName id)
+testStructuralTraveral :: Ann Expr (Dom GHC.Id) RangeStage
+testStructuralTraveral 
+  = runIdentity $ traverseUpSI (return ()) (return ()) nullspan $ testExpr
+  where nullspan = SourceTransform (nodeSpan != GHC.noSrcSpan) (listPos != GHC.noSrcLoc)
 
 
